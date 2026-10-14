@@ -1,0 +1,84 @@
+# Gera os instaladores sozinho no GitHub quando você publica uma versão.
+# Para publicar:  git tag v1.1.0  &&  git push origin v1.1.0   (veja PUBLICAR.md)
+name: Criar instaladores
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:   # também dá para rodar pelo botão "Run workflow" (só gera os arquivos, sem publicar)
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Definir versão
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' version.py)"; fi
+          echo "APP_VERSION=$V" >> "$GITHUB_ENV"
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Gerar o programa
+        run: pyinstaller --noconfirm --clean --windowed --name "Vinyl Player" --icon "assets\icon.ico" --add-data "assets;assets" main.py
+      - name: Instalar o Inno Setup (se faltar)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Criar o instalador
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "installer\vinyl-player.iss"
+          Rename-Item "Output\Vinyl-Player-Setup.exe" "Vinyl-Player-Setup-$env:APP_VERSION.exe"
+      - name: Criar a versão portátil (.zip, sem instalar)
+        shell: pwsh
+        run: Compress-Archive -Path "dist\Vinyl Player" -DestinationPath "Output\Vinyl-Player-Portatil-$env:APP_VERSION.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: Output/*
+
+  linux:
+    runs-on: ubuntu-22.04   # versão mais antiga = o .deb funciona também em Ubuntus mais velhos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Definir versão
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' version.py)"; fi
+          echo "APP_VERSION=$V" >> "$GITHUB_ENV"
+      - name: Criar o .deb
+        run: bash build_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: "*.deb"
+
+  publicar:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Montar a descrição da versão
+        run: sed "s/{{VERSION}}/${GITHUB_REF_NAME#v}/g" .github/release-notes.md > descricao.md
+      - uses: actions/download-artifact@v4
+        with:
+          path: arquivos
+          merge-multiple: true
+      - name: Publicar a versão
+        uses: softprops/action-gh-release@v2
+        with:
+          files: arquivos/*
+          body_path: descricao.md
+          generate_release_notes: true
